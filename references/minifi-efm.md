@@ -179,3 +179,59 @@ Two compounding gotchas, found building a Jetson Java agent's HTTP-proxy pairs b
 2. **Even after fixing that, every processor has a `penaltyDuration` scheduling field defaulting to 30 seconds — invisible in the Designer's property list**, since it's not a `properties` entry but a top-level field on the processor's `componentConfiguration` (`GET /efm/api/designer/flows/{flowId}/processors/{id}` shows it; confirm on the agent's own `flow.json.gz`, e.g. `penaltyDuration: 30000 ms`). `InvokeHTTP` penalizes the flowfile before routing it to `Retry`, so any 5xx adds a flat ~30s hang before the downstream `HandleHttpResponse` ever sees it — easy to misdiagnose as a hung connection or a bad `Socket Read Timeout` when the HTTP call itself actually completed in milliseconds. For a synchronous request/response pair that terminates on error rather than genuinely retrying, **set `penaltyDuration` to `0 sec`** via the same processor PUT (top-level field, alongside `properties`) — penalizing serves no purpose when nothing loops back.
 
 Check both on *every* `HandleHttpRequest`/`InvokeHTTP` pair copied from a working template, not just new ones — a template that's only ever seen 2xx responses in testing (e.g. `/classify`) can carry this same latent bug unnoticed indefinitely.
+
+## 14. Orphaned Resource assets cause a permanent `SYNC RESOURCE` failure loop — unassigning them isn't enough, and the dashboard won't tell you it's fixed
+
+A second, distinct root cause for the same "Updated Agents" dashboard symptom as §4's incident — that one was a hand-built deployer command reusing an `agentIdentifier`; this one is a resource-sync cache issue on an otherwise correctly-enrolled agent. Same visible red badge, two unrelated mechanisms — check which one you actually have before applying either fix.
+
+Real incident: an agent class migrated from a C++ agent to a Java one, but a handful of Python assets (`ExecuteScript` files the old C++ agent used) stayed **assigned** to the class in the resource manager. Java `ExecuteScript` can't run Python at all, so these were dead weight the moment the migration happened — and every heartbeat cycle the live agent's `SYNC RESOURCE` operation failed:
+
+```
+org.apache.nifi.c2.client.http.C2ServerException: Resource content retrieval failed with HTTP return code 500
+	at org.apache.nifi.c2.client.http.C2HttpClient.retrieveResourceItem(...)
+	at org.apache.nifi.minifi.c2.command.syncresource.DefaultSyncResourceStrategy...
+```
+(from the agent's own `minifi-app.log` — EFM's `operation.details` just says `"No resource items were retrieved, please check the log for errors"`, same "check the agent's log, not EFM's own claim" rule as everywhere else in this doc.)
+
+**Diagnose which resources are the problem:**
+```bash
+curl -s http://<efm-host>:10090/efm/api/agent-class-resource-manager/<class>/assigned
+```
+Cross-check the file names against what the live agent's actual type can run — an asset left over from a since-migrated agent type (C++ script assigned to a now-Java-only class) is the classic orphan.
+
+**Confirm the failing operation, straight from Postgres** (`operation` + `operation_arg`, same tables as the agent/device registry query elsewhere in this doc):
+```sql
+SELECT id, operand, state, details FROM operation
+WHERE target_agent_id = '<agent-id>' ORDER BY created DESC LIMIT 5;
+
+SELECT arg_key, arg_value FROM operation_arg WHERE operation_id = '<op-id>';
+```
+`operation_arg`'s `resourceList` value spells out exactly which resource IDs/URLs (`/c2-protocol/resource/{id}`) the agent was told to fetch, and `globalHash` is the digest EFM computed to decide a sync was needed.
+
+**Unassigning via the documented API (§9) is necessary but was not sufficient.** `PUT /agent-class-resource-manager/<class>/save` with `resourceIdsToBeUnassigned` updates Postgres correctly — confirmed via `/assigned`, `/unassigned`, and `/resource-manager/resources/{id}/agent-classes` all reflecting the change immediately. But **the very next `SYNC RESOURCE` operation still failed with the byte-identical `resourceList` and `globalHash` digest as every failure before the unassign** — diffed directly via `operation_arg.arg_value`. EFM caches the per-class resource digest it uses to build this operation somewhere the assign/unassign REST call doesn't invalidate; the read endpoints are honest, the operation-generation path isn't.
+
+**The actual fix:** restart the EFM pod.
+```bash
+kubectl rollout restart deployment/efm -n <ns>
+kubectl rollout status deployment/efm -n <ns> --timeout=90s
+```
+This only restarts EFM's own JVM — Postgres and any PVCs (§2) are untouched, so nothing is lost; it exists purely to force EFM to drop its in-memory cache and reload from Postgres. Confirmed: the first `SYNC RESOURCE` operation after the restart came back `DONE` with an empty `resourceList`.
+
+**Before restarting: check nothing is mid-flight, across *every* agent, not just the one you're fixing** — an EFM restart drops every connected agent's heartbeat channel for the ~10-20s it takes to come back:
+```sql
+SELECT target_agent_id, operation_type, operand, state, created
+FROM operation WHERE state IN ('QUEUED', 'DEPLOYED');
+```
+Empty result = nothing mid-flight, safe to restart. Treat this exactly like any other live-service restart — confirm before doing it, fresh, every time.
+
+**The "Updated Agents" dashboard health badge does not reflect any of this, in either direction.** It's bound to the class's most recent row in the `bulk_operation` table, not to live per-operation health:
+```sql
+SELECT * FROM bulk_operation WHERE agent_class_id = '<class>' ORDER BY updated DESC LIMIT 1;
+```
+A `bulk_operation` row is only created by a class-wide action (e.g. publishing a flow to the whole class) — routine per-agent `SYNC RESOURCE`/heartbeat retries never touch it. So a class can have every individual operation succeeding (confirmed via the `operation` table above) and still show red on the dashboard indefinitely, because nothing has run a fresh bulk action since the last one failed. Don't trust the dashboard tile as proof of health *or* of breakage — query `operation` and `bulk_operation` directly, same "REST/UI view is unreliable, Postgres is truth" rule as the rest of this doc.
+
+**Clearing the badge for real: a plain republish is enough, no flow content change needed.** `GET .../flows/{flowId}/version-info` will likely show `dirty: false` (nothing to publish) — EFM's `POST .../flows/{flowId}/publish` still accepts it anyway, bumps `flowVersion`, and pushes a fresh `UPDATE CONFIGURATION` to every agent in the class. Confirmed end-to-end: this created a brand-new `bulk_operation` row that went `DONE`, and the class's health status flipped to `GOOD` within seconds — no delete/recreate needed, and no observed disruption to the running agent (same `agentId`, same processors, heartbeat never dropped). **This is still a live config push to every agent in the class** — export the flow first (below) and confirm before doing it, same as any other redeploy.
+
+**If a plain republish doesn't clear it** (the class is more deeply broken than a stale badge — e.g. the agent itself won't apply the config, or `UPDATE CONFIGURATION` keeps coming back `FAILED`), the fallback is delete-agent → delete-class → recreate. **The trap in that fallback: don't deploy a flow carried over from the old (deleted) class's designer-flow ID.** The old flow ID belongs to a retired class; pushing it at a freshly-recreated class either fails outright or drags forward whatever made the old class unhealthy in the first place. Build the new class's flow fresh in the Designer (or recreate it processor-by-processor via §7's API, same technique as any programmatic build) rather than pointing the new class at the old flow ID — and per §4, get the deployer command from `generateCommand`, never hand-built, with a fresh `agentIdentifier`. This combination (fresh identifier + fresh flow, never reused) is what keeps a class recreation from reproducing the exact failure it was meant to fix.
+
+**Cheap insurance before either path:** export the class's live flow definition first (`GET /efm/api/designer/flows/{flowId}`, same pattern as §4's NiFi-side export in `flow-api.md`) so a restart or republish that surfaces some other latent issue doesn't cost you the ability to see what the flow looked like going in.
