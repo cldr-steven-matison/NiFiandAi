@@ -98,7 +98,11 @@ PUT  /processors/{id}/run-status      # {"revision":{"version":N},"state":"RUNNI
 
 This endpoint takes revision + state only. It cannot corrupt sensitive properties. It's the basis of the `run-once` pattern: start → sleep a few seconds → re-fetch revision → stop.
 
+**A running processor rejects a property-only `PUT` with `409 Conflict`.** NiFi requires the processor be `STOPPED` before any config-property change lands — a full-entity `PUT` (properties intact, just changing one) against a `RUNNING` processor 409s even though the exact same body would succeed while stopped. The safe sequence for changing a live, in-use processor's property (e.g. repointing an `InvokeHTTP`'s target URL): `run-status` → `STOPPED` (narrow endpoint, safe per above) → `GET` full entity (revision bumped by the stop) → `PUT` full entity with the one property changed → `run-status` → `RUNNING` again (revision bumped again). Each step's revision must come from the immediately-preceding response, not an earlier one.
+
 **Property edit** — send only the properties you're changing; never PUT the full entity. If the property is sensitive, don't send it here at all — bind it to a Parameter Context and manage the value there (see rule 2 in `SKILL.md`).
+
+**Hitting the API via a pod's own IP instead of its expected hostname can fail TLS entirely.** `curl -sk https://<pod-ip>:8443/nifi-api/...` from inside the pod itself returned `400 Invalid SNI` on a cluster where `https://localhost:8443` also failed (connection refused — the port is bound to the pod's IP, not loopback). Fix: `curl -sk --connect-to <expected-hostname>:8443:<pod-ip>:8443 https://<expected-hostname>:8443/nifi-api/...` — connects to the real reachable address while sending the hostname the server's Jetty SNI check actually wants (its own service DNS name, `<nifi-svc>.<ns>.svc.cluster.local` in an operator-managed deployment). Confirm the pod's actual bound address first (`ss -tlnp` inside the pod) rather than assuming `localhost` or a bare IP will work.
 
 ## 6. Client libraries (nipyapi)
 
