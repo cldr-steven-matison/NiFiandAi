@@ -33,14 +33,35 @@ A MiNiFi agent pod downloads the deployer script from EFM at startup. EFM's Jett
 
 **Fix:** health-poll `/efm/actuator/health` (e.g. 120 × 5s = 10 min ceiling) *before* running the deployer. Diagnose with `kubectl exec <agent-pod> -- ls /nifi-minifi-cpp-<ver>/` — empty means the deployer never ran.
 
-## 4. Deploying an agent (the deployer curl)
+## 4. Deploying an agent (the deployer command)
 
-Same shape for every arch — swap `agentType` / `agentVersion` / `osArch`:
+**Get the command from EFM — never hand-build or copy-edit it.** The only sanctioned way to obtain a deployer command is EFM's own **Deploy Agent CLI** screen in the UI, or its backing API `POST /efm/api/agent-deployer/generateCommand`. Both return the full, ready-to-run command with a **server-minted `agentIdentifier`**. Do **not** hand-construct the `curl`/`Invoke-WebRequest`, and do **not** copy a previous deployment's command and tweak the fields — that is exactly how a stale `agentIdentifier` gets reused and two pods collide on one EFM identity (see the note below).
+
+`generateCommand` body — **omit `agentIdentifier` and the server generates a fresh, collision-free one:**
+
+```bash
+curl -s -X POST http://<efm-host>:10090/efm/api/agent-deployer/generateCommand \
+ -H 'Content-Type: application/json' \
+ -d '{
+   "agentClass": "MyClass",
+   "agentType": "cpp",
+   "agentVersion": "<ver>",
+   "osArch": "linuxaarch64",
+   "baseUrl": "http://127.0.0.1:<port>/efm/api",
+   "hbPeriod": 5000,
+   "serviceUser": "minifi",
+   "serviceName": "minifi",
+   "autoConfigureSecurity": false,
+   "trustSelfSignedCertificates": false
+ }'
+```
+
+The returned command has the shape below (shown so you can read the fields — **do not assemble it by hand**; the `agentIdentifier` line is server-supplied, not something you pick or copy):
 
 ```bash
 curl -L \
  -d agentClass=MyClass \
- -d agentIdentifier=$(cat /proc/sys/kernel/random/uuid) \
+ -d agentIdentifier=<SERVER-MINTED — never hand-picked or reused> \
  -d agentType=cpp \
  -d agentVersion=<ver> \
  -d autoConfigureSecurity=false \
@@ -52,7 +73,9 @@ curl -L \
  http://<efm-host>:10090/efm/api/agent-deployer/script | bash -
 ```
 
-- **Windows:** `Invoke-WebRequest ... | Invoke-Expression` from PowerShell **as Administrator**. Do **not** run it from `C:\WINDOWS\system32` — the deployer installs to `$PWD` and system32 is a permission nightmare. `cd` to a clean dir first.
+> **Why this is a rule, not a preference:** re-enrolling an agent under a new class with a **hand-built** deployer command that **reused the retired agent's `agentIdentifier`** made the EFM C2 `UPDATE` (the push of the flow to the re-enrolled agent) fail repeatedly (`state: FAILED`), and the Agents update-status column showed errors for the class — two pods claimed one identity. Re-enrolling via `generateCommand` with its server-generated identifier fixed it. The one place reusing an identifier is correct is restoring the **exact same** bare pod that was never de-registered (§11) — a *new* enrollment or a *class migration* is not that case; mint a fresh identifier.
+
+- **Windows:** run the *generated* command via `Invoke-WebRequest ... | Invoke-Expression` from PowerShell **as Administrator**. Do **not** run it from `C:\WINDOWS\system32` — the deployer installs to `$PWD` and system32 is a permission nightmare. `cd` to a clean dir first.
 
 ## 5. Windows MiNiFi + Python (the real gotcha)
 
