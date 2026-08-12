@@ -185,7 +185,7 @@ This blocks configuring the processor's properties through the Designer: `.../va
 
 ## 13. `InvokeHTTP` in a `HandleHttpRequest → InvokeHTTP → HandleHttpResponse` pair: a 5xx from the target can hang the client for 30+ seconds, or forever
 
-Two compounding gotchas, found building a Jetson Java agent's HTTP-proxy pairs by copying an existing working pair (a `/classify` proxy) as a template:
+Two compounding gotchas, found building an edge device's Java-agent HTTP-proxy pairs by copying an existing working pair (a `/classify` proxy) as a template:
 
 1. **The `Retry` relationship (status 500-599) is not auto-terminated and easy to leave wired back to the processor itself** (a self-loop looks harmless when copying an existing template, since the working template only ever exercised the 2xx path). With no other destination, a flowfile routed to `Retry` loops forever — the client waiting on `HandleHttpResponse` never gets an answer, no matter how generous `InvokeHTTP`'s own socket timeouts are set. **Route `Retry` to the same terminal `HandleHttpResponse` as `No Retry`/`Failure`** (one connection can carry all three relationships) unless a real automatic-retry loop is actually wanted.
 
