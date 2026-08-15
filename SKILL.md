@@ -58,7 +58,7 @@ A rebuild/redeploy — or a single-replica pod restart — of any service a runn
 | `references/custom-processors.md` | Writing custom Python/Java processors, the mixed-template EL trap, and rebuild→redeploy discipline. |
 | `references/minifi-efm.md` | The edge side: staging agent binaries, EFM persistence, deploying an agent via EFM's `generateCommand` (never a hand-built deployer curl), Windows+Python, the (undocumented) EFM Flow Designer API, recovering an EFM-managed agent whose heartbeat has gone silently dark (bare-pod restart, asset-sync race, IP instability), a manifest-cache staleness gotcha when a processor's properties change but its name doesn't, and orphaned Resource assets causing a permanent `SYNC RESOURCE` failure loop that unassigning alone won't clear (needs an EFM pod restart) — plus why the "Updated Agents" dashboard badge can stay red or green independent of actual health. |
 | `references/debugging.md` | Cross-cutting wire-up gotchas and a 10-step debugging checklist. |
-| `references/layout.md` | Canvas layout & arrangement: the coordinate model, grounded spacing constants, per-shape placement rules, and a worked example — plus the running list of other things a Claude-built flow still needs a human pass on. |
+| `references/layout.md` | Canvas layout & arrangement: the coordinate model, grounded spacing constants, direction & sprawl rules (route/add down never up, new work goes right of existing canvas, one test funnel, per-branch terminal logs), per-shape placement rules, and a worked example — plus the running list of other things a Claude-built flow still needs a human pass on. |
 
 ## The most common ways a NiFi flow silently fails
 
