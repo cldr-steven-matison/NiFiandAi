@@ -14,17 +14,25 @@ A working playbook for building **NiFi 2.x + MiNiFi + EFM** flows programmatical
 - `<external-nodeport>` — Kafka's external NodePort (only relevant when a flow runs *outside* the cluster).
 - Self-signed TLS is assumed by default, hence `-k` / `verify_ssl=False`. Drop it once you've wired a real cert.
 
-## The 9 rules — read before touching any live flow
+## The 10 rules — read before touching any live flow
 
 1. **Live UI / `flow.json` is truth. Docs and memory lag.** Before touching a running Process Group, dump the live flow and read what's actually there:
    ```bash
    kubectl exec <nifi-pod> -n $NS -- gunzip -c /opt/nifi/nifi-current/conf/flow.json.gz | jq '<selector>'
    ```
    Never edit blind from a remembered description of the flow.
+
+   **One carve-out: `flow.json` is truth for *structure and state*, not for whether a sensitive property is parameter-bound.** NiFi persists the **resolved** value of a `#{param}`-referenced sensitive property as `enc{...}` — byte-for-byte the same form as a genuine inline literal. `flow.json.gz` cannot tell the two apart, and a `GET /processors/{id}` can't either (it masks both as `********`). The authoritative check is the parameter context:
+   ```bash
+   GET /nifi-api/parameter-contexts/{id}
+   # -> .component.parameters[].parameter.referencingComponents[]   <- this list is the answer
+   ```
+   Reading `enc{}` as "literal, so the Parameter Context migration never happened" is a real trap: it once cost a third of a session and produced a wrong user-facing claim that credentials had regressed, plus a re-run of a migration that had been done weeks earlier and had held the whole time.
 2. **Never GET-then-PUT a processor entity that has sensitive properties.** NiFi returns `"********"` for a sensitive property on GET; PUT the returned entity back and you write that literal string over the real credential, destroying it. Instead:
    - Bind sensitive props to a **Parameter Context** (`#{param-name}`) — write-only via the API, immune to the mask. This is the only safe pattern for credentials inside a flow.
    - Or use a narrow-scope endpoint that sends only the field you're changing, e.g. `PUT /processors/{id}/run-status` (revision + state only).
    - Before any full-entity PUT, check that processor's `descriptors[...].sensitive` — this applies to every processor that has one, not just ones already known to hold credentials. `validationStatus: VALID` never proves a sensitive value is real; NiFi can't tell a genuine secret from the mask string.
+   - To check whether a given processor is *already* bound to a Parameter Context, use the context's `referencingComponents` (rule 1's carve-out) — not `flow.json.gz`, and not a `GET` of the processor. Neither of those can distinguish a reference from a literal.
 3. **Don't hand-patch a live Process Group while it's actively posting/queueing.** Route the change through the API from a trusted host, or rebuild → redeploy. Never inject hand-crafted data into a live trigger to shortcut a test — let the real pipeline fire it.
 4. **Keep changes scoped.** Make the change asked for, not the adjacent "obvious improvement." A rename is not a rewire is not a retype — bundling them turns a one-line review into a hunt.
 5. **Every flow change gets exported + committed.** A running canvas that isn't in version control is one restart from gone. Export the Process Group JSON after every real change.
@@ -32,6 +40,7 @@ A working playbook for building **NiFi 2.x + MiNiFi + EFM** flows programmatical
 7. **`Retry` is not `Failure`.** Auto-terminating `InvokeHTTP`'s `Retry` relationship silently drops every transient 5xx/429. Self-loop `Retry` with a bounded `FlowFile Expiration` (10 min is a good default) and route `Failure`/`No Retry` to a log processor.
 8. **Build new logic in its own new, finite Process Group — never inline inside a live one.** Sharing a PG with running logic is how a connection lands on the wrong relationship or a rewire silently reroutes existing traffic, and it makes "what changed" unreviewable. Give the new capability its own PG with no shared connections, sitting alongside the existing flows rather than woven into them. If it genuinely must connect into an existing flow, make that a separate, deliberate step — don't let the wiring fall out as a side effect of the build.
 9. **Decompose into a FlowFile chain of small native processors — don't put timers, state, and branching inside one custom Python processor.** A single `FlowFileSource` running its own background thread looks simpler but is the wrong shape: you lose per-stage queue counts, provenance, mid-flow inspection, and the ability to re-test one step by re-queuing a FlowFile — and the thread can outlive NiFi's own start/stop lifecycle (*why:* a leaked internal-timer thread once kept re-logging stale state after a restart, which a stock-processor chain can't do since NiFi owns all scheduling). Prefer `GenerateFlowFile`(timer) → `InvokeHTTP`/`SplitJson`/`EvaluateJsonPath`/`RouteOnAttribute`, and let each processor's `Run Schedule` drive cadence — never an internal `while`/`sleep`. Reach for custom Python only for the one thing NiFi can't do natively (e.g. one persistent external socket). Shape detail in `patterns.md`.
+10. **Never read `flow.json.gz` to add a component.** Adding a PG to a live environment does not require reading the root flow. The committed JSON export in your git repo is the source of truth — download it from disk or its GitHub raw URL, then POST it to the parent PG's `process-groups/upload` endpoint. This is surgical: only the new PG is touched; the rest of the canvas is never read or modified. If you need to know what's already deployed, use `GET /nifi-api/process-groups/root/process-groups` to list child PGs by name — not the config file. Full playbook, upsert pattern, Parameter Context pre-create, k8s Job template, and secret manager options: `references/flow-registry.md`.
 
 ## Deployment shapes
 
@@ -59,6 +68,7 @@ A rebuild/redeploy — or a single-replica pod restart — of any service a runn
 | `references/minifi-efm.md` | The edge side: staging agent binaries, EFM persistence, deploying an agent via EFM's `generateCommand` (never a hand-built deployer curl), Windows+Python, the (undocumented) EFM Flow Designer API, recovering an EFM-managed agent whose heartbeat has gone silently dark (bare-pod restart, asset-sync race, IP instability), a manifest-cache staleness gotcha when a processor's properties change but its name doesn't, and orphaned Resource assets causing a permanent `SYNC RESOURCE` failure loop that unassigning alone won't clear (needs an EFM pod restart) — plus why the "Updated Agents" dashboard badge can stay red or green independent of actual health. |
 | `references/debugging.md` | Cross-cutting wire-up gotchas and a 10-step debugging checklist. |
 | `references/layout.md` | Canvas layout & arrangement: the coordinate model, grounded spacing constants, direction & sprawl rules (route/add down never up, new work goes right of existing canvas, one test funnel, per-branch terminal logs), per-shape placement rules, and a worked example — plus the running list of other things a Claude-built flow still needs a human pass on. |
+| `references/flow-registry.md` | Add/Update a PG without root flow; GitHub as registry; PG upsert (stop→drain→delete→reimport); Parameter Context pre-create from k8s Secrets; complete k8s Job YAML; HashiCorp Vault and AWS Secrets Manager options; NiFi Registry as optional enhancement. |
 
 ## The most common ways a NiFi flow silently fails
 

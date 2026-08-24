@@ -104,6 +104,21 @@ This endpoint takes revision + state only. It cannot corrupt sensitive propertie
 
 **Deleting a connection requires BOTH endpoint processors `STOPPED`, not just a version match.** `DELETE /connections/{id}?version=N&clientId=...` 409s with `Upstream component of Connection (...) is running` (then, once the source is stopped, `Destination of Connection (...) is running`) if either the source or destination processor is `RUNNING` — this is a separate requirement from the revision-version check, and the error message is the only thing that tells you which side is still blocking. Sequence: `run-status` the source to `STOPPED`, `run-status` the destination to `STOPPED`, delete the connection(s), then `run-status` both back to `RUNNING` if they were running before. If several connections share the same source processor (a fan-out, e.g. one `RouteOnAttribute` feeding many downstream branches), stopping that one processor pauses *everything* it feeds, not just the branch you're editing — confirm that's an acceptable blast radius (and get a fresh go-ahead if it's a shared, live-traffic PG) before stopping it, per rule 8 below.
 
+**Is this property actually parameter-bound? Ask the parameter context, not the processor and not `flow.json`.** Both of the obvious checks lie: `flow.json.gz` stores the **resolved** value of a `#{param}` reference as `enc{...}`, identical in form to a real inline literal, and `GET /processors/{id}` masks a sensitive value as `********` whether it is bound or not. Only the context knows:
+
+```bash
+# 1. find the context
+curl -sk --cert c.crt --key c.key "$NIFI/nifi-api/flow/parameter-contexts" \
+  | jq -r '.parameterContexts[] | "\(.id)  \(.component.name)"'
+
+# 2. ask it which components reference each parameter — this list is authoritative
+curl -sk --cert c.crt --key c.key "$NIFI/nifi-api/parameter-contexts/<ctx-id>" \
+  | jq -r '.component.parameters[]
+           | "\(.parameter.name): \([.parameter.referencingComponents[]?.component.name] | join(", "))"'
+```
+
+A parameter with an empty `referencingComponents` list is genuinely unused; a processor that appears there is genuinely bound, no matter what `flow.json.gz` shows. Verified from both ends: a processor created via `POST /process-groups/{id}/processors` with an explicit `"Client Secret": "#{twitch-chat-client-secret}"` — which the create response echoed back as `#{...}` and which validates `VALID` — still persisted to `flow.json.gz` as `enc{...}`.
+
 **Hitting the API via a pod's own IP instead of its expected hostname can fail TLS entirely.** `curl -sk https://<pod-ip>:8443/nifi-api/...` from inside the pod itself returned `400 Invalid SNI` on a cluster where `https://localhost:8443` also failed (connection refused — the port is bound to the pod's IP, not loopback). Fix: `curl -sk --connect-to <expected-hostname>:8443:<pod-ip>:8443 https://<expected-hostname>:8443/nifi-api/...` — connects to the real reachable address while sending the hostname the server's Jetty SNI check actually wants (its own service DNS name, `<nifi-svc>.<ns>.svc.cluster.local` in an operator-managed deployment). Confirm the pod's actual bound address first (`ss -tlnp` inside the pod) rather than assuming `localhost` or a bare IP will work.
 
 ## 6. Client libraries (nipyapi)
