@@ -18,9 +18,19 @@ A working playbook for building **NiFi 2.x + MiNiFi + EFM** flows programmatical
 
 1. **Live UI / `flow.json` is truth. Docs and memory lag.** Before touching a running Process Group, dump the live flow and read what's actually there:
    ```bash
-   kubectl exec <nifi-pod> -n $NS -- gunzip -c /opt/nifi/nifi-current/conf/flow.json.gz | jq '<selector>'
+   # Ask the pod where its flow lives - do NOT hardcode the directory (see below).
+   NIFI_HOME=/opt/nifi/nifi-current
+   FLOW=$(kubectl exec <nifi-pod> -n $NS -c nifi -- \
+            sed -n 's|^nifi\.flow\.configuration\.file=\./||p' $NIFI_HOME/conf/nifi.properties)
+   kubectl exec <nifi-pod> -n $NS -c nifi -- gunzip -c "$NIFI_HOME/$FLOW" | jq '<selector>'
    ```
    Never edit blind from a remembered description of the flow.
+
+   **The flow file is not always under `conf/`.** `nifi.flow.configuration.file` decides, and on the
+   CFM-operator pods it is `./data/flow.json.gz`, not `./conf/flow.json.gz` — a hardcoded `conf/` path
+   fails with an empty result and a zero-byte dump, which reads like "the flow is empty" rather than
+   "you looked in the wrong place". Also pass `-c nifi`: an operator-managed pod runs the NiFi container
+   alongside several log sidecars, and without it `kubectl exec` can land in one that has no flow at all.
 
    **One carve-out: `flow.json` is truth for *structure and state*, not for whether a sensitive property is parameter-bound.** NiFi persists the **resolved** value of a `#{param}`-referenced sensitive property as `enc{...}` — byte-for-byte the same form as a genuine inline literal. `flow.json.gz` cannot tell the two apart, and a `GET /processors/{id}` can't either (it masks both as `********`). The authoritative check is the parameter context:
    ```bash

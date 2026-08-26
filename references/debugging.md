@@ -17,7 +17,8 @@ Silent data loss in NiFi is almost always one of these. Work top to bottom:
 3. **Did the Python subprocess reload?** `kubectl logs <nifi-pod> -c nifi | grep -i "python\|extension"` — look for a fresh startup line *after* your last change.
 4. **What relationships are auto-terminated?** Dump the live flow:
    ```bash
-   kubectl exec <nifi-pod> -- gunzip -c conf/flow.json.gz \
+   # `data/`, not `conf/`, on the CFM-operator pods - resolve it from nifi.properties (SKILL.md rule 1)
+   kubectl exec <nifi-pod> -c nifi -- gunzip -c /opt/nifi/nifi-current/data/flow.json.gz \
      | jq '.rootGroup.processGroups[] | select(.name=="MyPG") | .processors[] | {name, autoTerminatedRelationships}'
    ```
    Silent drops are almost always a `Retry` / `Failure` / `unmatched` relationship auto-terminated here.
