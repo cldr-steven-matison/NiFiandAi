@@ -17,6 +17,57 @@ HandleHttpRequest → HandleHttpResponse (200, immediate ack) → …rest of the
 
 That gives fire-and-forget latency for the caller while the real work continues behind it — the same profile as the MiNiFi C++ router below, but by choice rather than by limitation, and reversible per flow when you *do* want to hold the connection and return a real payload. Confirmed on the MiNiFi Java agent: a POST returned a real 200 in ~84ms and the FlowFile independently reached the next processor afterward — the response genuinely flushes before downstream work has to finish, not just before it starts.
 
+### Consolidated router — ONE HandleHttpRequest + a path-driven InvokeHTTP for every route
+
+**When a single agent fronts several local upstreams (an edge-AI box with N inference services on N ports), do not build one `HandleHttpRequest → InvokeHTTP → HandleHttpResponse` triple per door.** That verbose per-leg shape (N listeners on N ports, ~3N processors) is what a fleet review flags — the simpler, canonical shape is **one listener + one dynamic InvokeHTTP keyed on the request path + one responder**, because the request path already tells you which upstream to call:
+
+```
+HandleHttpRequest (:PORT, Allowed Paths = /(reason|embed|rerank|transcribe))   ← one listener, all routes
+  → UpdateAttribute   (derive target.url from ${http.request.uri})
+  → InvokeHTTP        (HTTP URL = ${target.url})                                ← one dynamic caller
+  → HandleHttpResponse                                                          ← one responder
+```
+
+One `StandardHttpContextMap` still pairs the single request/response by the per-request `http.context.identifier`, so concurrent callers on different paths never cross — the map, not the port, is what pairs a response to its request (that's why one pair serves every route).
+
+**Two realizations of the path→target map, by how much the upstreams differ:**
+
+- **Same host+port, path passes straight through** — no map needed, just suffix the path: `HTTP URL = http://localhost:<port>${http.request.uri}`. One `HandleHttpRequest` (all paths) can feed several endpoints on one upstream server through a single `InvokeHTTP` this way — the request path *is* the upstream path.
+- **Doors differ by port and/or upstream path** — set `target.url` in one `UpdateAttribute` with a nested-`ifElse` case switch on the path, then `InvokeHTTP ${target.url}`:
+  ```
+  target.url = ${http.request.uri:equals('/reason'):ifElse('http://127.0.0.1:8000/v1/chat/completions',
+               ${http.request.uri:equals('/embed'):ifElse('http://127.0.0.1:8001/embed',
+               ${http.request.uri:equals('/rerank'):ifElse('http://127.0.0.1:8002/rerank',
+               'http://127.0.0.1:8003/inference')})})}
+  ```
+  A four-door router (e.g. `/reason /embed /rerank /transcribe` → four inference services on different loopback ports) collapses four separate listener legs (~12 processors) to one listener + one caller + one responder this way.
+
+**Per-route request Content-Type is set on the flowfile, not hardcoded on InvokeHTTP.** With one shared `InvokeHTTP`, leave its `Request Content-Type = ${mime.type}` and set `mime.type` on each branch (JSON routes → `application/json`; the multipart route → `multipart/form-data; boundary=…` in its reconstruction leg, below). Do **not** leave it as the literal `${Content-Type}` — no such attribute exists by default, it resolves empty, and a JSON upstream answers `415` (see the gotcha list below).
+
+**A route that needs a different request shape gets a sub-branch before the shared InvokeHTTP, not its own leg.** `/transcribe` takes a multipart upload that whisper needs reassembled — route it (a `RouteOnAttribute` on `${http.request.uri:equals('/transcribe')}`) through the multipart-reconstruction sub-leg below, which rejoins the shared `InvokeHTTP` once `target.url` and `mime.type` are set. One extra branch, still one listener and one responder.
+
+### Multipart reconstruction for a whisper `/inference` upload
+
+`HandleHttpRequest` **splits** an inbound `multipart/form-data` upload into one flowfile per part (headers exposed as `http.multipart.*` attributes); a whisper.cpp `/inference` endpoint wants the original multipart body back. Reassemble it:
+
+```
+HandleHttpRequest (multipart in)
+  → UpdateAttribute   fragment.identifier=${http.context.identifier},
+                      fragment.index=${http.multipart.fragments.sequence.number:minus(1)},
+                      fragment.count=${http.multipart.fragments.total.number}
+  → RouteOnAttribute  hasType = ${'http.multipart.content.type':isEmpty():not()}
+       hasType   → ReplaceText (Prepend a part header WITH Content-Type)
+       unmatched → ReplaceText (Prepend a part header, no Content-Type)
+  → MergeContent      Merge Strategy=Defragment, Merge Format=Binary Concatenation,
+                      Footer = --<BOUNDARY>--
+  → UpdateAttribute   mime.type = multipart/form-data; boundary=<BOUNDARY>
+  → InvokeHTTP        (the shared dynamic caller)
+```
+
+The `<BOUNDARY>` string in the two `ReplaceText` part-headers, the `MergeContent` footer, and the `mime.type` must be byte-identical. This is the sub-branch a `/transcribe`-style route hangs off the shared `InvokeHTTP`.
+
+**Verify the upstream's real route before pointing `InvokeHTTP` at it — don't assume the vendor's documented path.** whisper.cpp's server serves **`/inference` only**; the OpenAI-style `/v1/audio/transcriptions` route 404s on it. Curl the upstream directly (`curl -sS localhost:<port>/<path>`) and read the status before wiring the flow, rather than debugging a 404 as if it were a flow bug.
+
 ## MiNiFi C++ fire-and-forget router
 
 MiNiFi C++ has no request/response pair, so a flow that "answers" an HTTP call has to answer out-of-band:
