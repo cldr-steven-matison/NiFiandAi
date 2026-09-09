@@ -94,6 +94,12 @@ curl -sk --cert $CERT --key $KEY -X PUT \
 
 ## Step 2B — Upsert (update an existing PG)
 
+> **⚠️ Never delete+reimport a live PG that already has sensitive Parameter Context values set — it wipes the live credentials.** An exported or generated flow JSON always carries sensitive params as `value: null` (they're set out-of-band via the API *after* upload — see Step 3 and `flow-api.md` §4). Reimporting re-creates the Parameter Context with those nulls, so every live secret is blanked. Delete+reimport is safe **only** on a PG whose context has no live secrets yet (a first deploy). Any PG whose flow authenticates — an IMAP password, an API bearer token, a dispatcher token set live via the API — is exactly the case this destroys.
+>
+> **For a purely additive change** (a new port + processor + connections) do **not** delete+reimport. Make **targeted API POSTs against the live PG** instead: create the port/processor (`POST /process-groups/{id}/ports`, `POST /process-groups/{id}/processors`), stop just the one source processor to add its outbound connection (`run-status` → `STOPPED`, per `flow-api.md` §5), create the connections (`POST /process-groups/{id}/connections`), then restart. This never touches the Parameter Context, so the live secrets are never at risk. Re-export afterward with `GET /process-groups/{id}/download` (`flow-api.md` §4) — sensitive values still export as `null`, so the download is safe to commit.
+>
+> This is a **different** failure mode from the GET-then-PUT mask-corruption rule (`SKILL.md` rule 2 / `flow-api.md` §5): that one writes the `"********"` mask back over *one* property; this one blanks the *whole* Parameter Context on reimport.
+
 1. **Stop the PG:**
    ```bash
    curl -sk --cert $CERT --key $KEY -X PUT \
