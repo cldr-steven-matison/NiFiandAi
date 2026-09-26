@@ -40,6 +40,8 @@ class MyProc(FlowFileTransform):
 
 This is a limitation of the NiFi Python binding, not a config mistake, and it does **not** match Java-side NiFi EL (which handles multi-token templates fine, e.g. `ReplaceText`). Don't assume Python-processor EL behaves like Java NiFi EL.
 
+**The trap is wider than "more than one token".** In `nifiapi` 2.6.0 the binding's `__trivial_attribute_reference__` check uses `re.match`, which anchors only at the start — so **any value that merely *begins* with a bare `${attr}` evaluates to that one attribute alone**: `${dir}/${clip_id}.mp4` becomes just the dir, and `${clip_id}.mp4` becomes just the id. A value that starts with a literal or a parameter (`/clips/${clip_id}.mp4`, `#{Clips Dir}/${clip_id}.mp4`) is safe, and so is an expression with functions (`${x:isEmpty():ifElse(...)}` — no longer "trivial"). Rule for flow authors: keep a custom-processor property either a single bare `${attr}` or something that does not start with one.
+
 For any Python-processor property that mixes literal text with more than one attribute reference, **evaluate it yourself**: pull the raw string with `.getValue()` (no `evaluateAttributeExpressions`) and substitute manually:
 
 ```python
