@@ -46,6 +46,30 @@ One `StandardHttpContextMap` still pairs the single request/response by the per-
 
 **A route that needs a different request shape gets a sub-branch before the shared InvokeHTTP, not its own leg.** `/transcribe` takes a multipart upload that whisper needs reassembled — route it (a `RouteOnAttribute` on `${http.request.uri:equals('/transcribe')}`) through the multipart-reconstruction sub-leg below, which rejoins the shared `InvokeHTTP` once `target.url` and `mime.type` are set. One extra branch, still one listener and one responder.
 
+### SQL-backed door: one dispatch function in the database, not one leg per route
+
+The same mistake shows up when the routes answer from a database instead of an upstream service. A door that serves a UI from Postgres grows one leg per route: `UpdateAttribute` (bind `sql.args`) → `ExecuteSQLRecord` → `EvaluateJsonPath` (body to content) → its own `HandleHttpResponse`. Only the SQL text and the arguments differ between legs. At 31 routes that shape reached 144 processors and 244 connections. Moving the routes into the database brought the same door down to 35 processors with the same responses, byte for byte.
+
+**Put the routing in one database function, and keep one chain in NiFi:**
+
+```
+HandleHttpRequest → ExtractText (request body → door.body, before any leg replaces the content)
+  → RouteOnAttribute (only the routes NiFi itself must serve peel off; everything else → sql)
+  → AttributesToJSON (http.query.param.*, door.body, anything a leg read live → JSONAttributes)
+  → UpdateAttribute (sql.args: "<METHOD> <uri>", ${JSONAttributes}, config parameters)
+  → ExecuteSQLRecord  SELECT r->>'status', r->>'body', r->>'relay', … FROM (SELECT door_api(?, ?::jsonb) AS r) d
+  → EvaluateJsonPath (status / relay → attributes) → EvaluateJsonPath ($[0].body → content)
+  → HandleHttpResponse (HTTP Status Code = ${door.status})                 ← one responder for every route
+```
+
+- `door_api(route text, params jsonb) → json {status, body, …}` dispatches on method and path to one small function per route. A write that matches no row returns `404` from the function; a bad body or SQL error returns a `500 {"error"}` from it too (catch in the dispatcher).
+- **A write another flow already performs comes back with a relay target.** The function returns `relay` (the out port), the action, and the body that flow expects; NiFi clones the result, answers `202` on one copy, and routes the other with one `RouteOnAttribute` on the relay attribute. Drop `sql.args.*` on the relayed copy, since a downstream `PutSQL` binds every `sql.args.N` it finds.
+- **Reads that need NiFi stay as short pre-legs that feed the same chain.** A NiFi REST read, a ping to a model server, a `df` via `ExecuteStreamCommand`: put what they read on attributes, include those in the `AttributesToJSON` regex, and let the function build the body. The request body must be captured before these legs, because an `InvokeHTTP` in content mode replaces the content.
+- **One `HandleHttpResponse` for everything.** The refusals set `door.status` and an error text in an `UpdateAttribute`, one `ReplaceText` builds `{"error": …}`, and the responder's status is `${door.status:isEmpty():ifElse('200', ${door.status})}`.
+- **Every route is testable from `psql` without the canvas:** `BEGIN; SELECT door_api('POST /api/…', '{…}'); ROLLBACK;`. A new route is a function plus its path on the listener's `Allowed Paths`.
+
+Two property traps on this chain: `AttributesToJSON`'s regex property key is `attributes-to-json-regex`, not its display name (a flow definition that uses the display name imports with the processor INVALID); and `InvokeHTTP` writes `invokehttp.request.duration` (ms), so a ping's latency needs no timestamp pair around it.
+
 ### Multipart reconstruction for a whisper `/inference` upload
 
 `HandleHttpRequest` **splits** an inbound `multipart/form-data` upload into one flowfile per part (headers exposed as `http.multipart.*` attributes); a whisper.cpp `/inference` endpoint wants the original multipart body back. Reassemble it:
