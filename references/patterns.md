@@ -68,6 +68,12 @@ HandleHttpRequest → ExtractText (request body → door.body, before any leg re
 - **One `HandleHttpResponse` for everything.** The refusals set `door.status` and an error text in an `UpdateAttribute`, one `ReplaceText` builds `{"error": …}`, and the responder's status is `${door.status:isEmpty():ifElse('200', ${door.status})}`.
 - **Every route is testable from `psql` without the canvas:** `BEGIN; SELECT door_api('POST /api/…', '{…}'); ROLLBACK;`. A new route is a function plus its path on the listener's `Allowed Paths`.
 
+The same move works beyond a door, wherever several legs differ only in SQL text or in a template:
+
+- **Replies built by several routers.** When each branch of several `RouteOnAttribute`s ends in its own `ReplaceText` body, route every branch into one `AttributesToJSON` and one `SELECT reply(${RouteOnAttribute.Route}, ?::jsonb)`. `RouteOnAttribute` writes the name of the relationship it matched to `RouteOnAttribute.Route` on every FlowFile, so the relationship name is the branch key. Make the relationship names unique across the routers, since the last router to touch a FlowFile is the one that wins.
+- **Counting a result.** `ExecuteSQLRecord` writes `executesql.row.count` on its output, so a "did the claim return anything" router can read that attribute directly, with no `EvaluateJsonPath` `$.length()` step in between.
+- **Proving the move.** Run the old leg's templates through NiFi's own Expression Language engine off the canvas and compare the results with the function inside a rolled-back transaction. Copy the `nifi-expression-language` jar and its dependencies out of the running NiFi. Evaluate each template with `Query.prepare(template).evaluateExpressions(new StandardEvaluationContext(attributes), null)`, over real rows and edge cases, and add one planted difference to show the comparison can fail. This catches what a re-implementation of the EL in the test would copy, for example the `substring` trap in `debugging.md`.
+
 Two property traps on this chain: `AttributesToJSON`'s regex property key is `attributes-to-json-regex`, not its display name (a flow definition that uses the display name imports with the processor INVALID); and `InvokeHTTP` writes `invokehttp.request.duration` (ms), so a ping's latency needs no timestamp pair around it.
 
 ### Multipart reconstruction for a whisper `/inference` upload

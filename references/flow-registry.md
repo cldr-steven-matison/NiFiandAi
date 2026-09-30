@@ -124,6 +124,8 @@ curl -sk --cert $CERT --key $KEY -X PUT \
 
 4. **Re-import** as Step 2A.
 
+5. **Start only what was running before.** A PG-level start (`PUT /flow/process-groups/{id}` with `RUNNING`) starts every stopped component in the group, including a cron trigger that was stopped on purpose: a schedule someone switched off, or a source that another system now triggers instead. Before step 1, record the names of the processors and ports that are not `RUNNING`. After the re-import, start the others one at a time with `PUT /processors/{id}/run-status` (and `/input-ports/{id}/run-status`, `/output-ports/{id}/run-status`) and leave the recorded ones stopped. Keep going past a refusal and report it at the end, so one component that won't start doesn't leave the rest stopped. The PG-level start is fine only when everything was running. The same applies when you restart the old PG because a drain timed out.
+
 ---
 
 ## Step 3 — Parameter Context pre-create (before starting)
