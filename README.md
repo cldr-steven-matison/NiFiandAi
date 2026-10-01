@@ -12,14 +12,17 @@ binaries, the deployer curl, the undocumented Flow Designer API).
 
 ## What's here
 
-- **`SKILL.md`** — the playbook: the always-on rules, deployment shapes, and a map into the references.
+- **`SKILL.md`** — the playbook: the always-on rules and a map into the references. Kept short on purpose, since it loads every time.
 - **`references/`** — load-on-demand deep dives:
-  - `flow-api.md` — deploying/editing flows via the NiFi REST API.
+  - `flow-api.md` — deployment shapes, reading the live flow, and deploying/editing flows via the NiFi REST API.
+  - `flow-registry.md` — adding or updating a process group without touching the root flow, with git as the registry.
   - `patterns.md` — flow patterns that ship (NiFi-as-HTTP-API, fire-and-forget router, the RAG shape).
   - `custom-processors.md` — writing custom Python/Java processors and rebuild→redeploy discipline.
-  - `minifi-efm.md` — the edge side: agent binaries, EFM persistence, the deployer, the Designer API.
+  - `minifi-efm.md` — the edge side: C++ vs Java agents, agent binaries, EFM persistence, the deployer, the Designer API.
+  - `site-to-site.md` — Site-to-Site and secure-cluster rollout on the CFM operator.
   - `debugging.md` — cross-cutting wire-up gotchas and a debugging checklist.
-  - `layout.md` — canvas layout: the coordinate model, spacing constants, and per-shape placement.
+  - `layout.md` — canvas layout: NiFi's box sizes, pitches, direction rules, failure sinks, labels, and root-canvas placement.
+- **`scripts/check_layout.py`** — the layout rules as a checker. Run it on a flow JSON before you upload it: `python3 scripts/check_layout.py flow.json`. It exits non-zero on overlapping boxes, siblings too close for a connection label, bend-less duplicate connections (the overlap warning NiFi 2.9+ shows), upward routes, and ports or groups placed far from what they connect.
 
 ## Install
 
