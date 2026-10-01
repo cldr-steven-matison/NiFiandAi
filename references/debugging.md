@@ -2,6 +2,7 @@
 
 ## Cross-cutting wire-up gotchas
 
+- **A redeploy can break a live flow.** Rebuilding or redeploying (or restarting a single-replica pod of) a service that a running `InvokeHTTP` targets kills the in-flight request mid-response (`unexpected end of stream`), the same silent drop as an auto-terminated `Retry`. It isn't a NiFi edit, so it's easy to treat as unrelated. Before any such redeploy: dump the live flow, confirm no processor is running or mid-fetch and let in-flight ones drain (don't fire and assume they stopped), and get a fresh go-ahead each time. The wider restart policy is deploy discipline; keep it in your own runbook.
 - **Kafka external NodePort vs. internal port.** `PublishKafka`/`ConsumeKafka` bootstrap must be the external broker port when the flow runs *outside* the cluster (edge MiNiFi). It's `9092`/`9093` from *inside* the cluster.
 - **Broker `advertisedHost` for cross-network access.** For consumers on a different network (VPN/overlay/LAN), each broker's advertised host must be a DNS name those consumers can resolve — not the raw pod IP. With Strimzi, patch `spec.kafka.listeners[].configuration.brokers[N].advertisedHost`; a rolling restart follows automatically.
 - **The NiFi pod clock is UTC.** Any cron-driven processor (`GenerateFlowFile`, scheduled `InvokeHTTP`) fires on UTC. A "3pm–9pm EST" window is a different set of hours in UTC. The pod does not honor `TZ` unless the StatefulSet is patched.
@@ -23,7 +24,7 @@ Silent data loss in NiFi is almost always one of these. Work top to bottom:
 3. **Did the Python subprocess reload?** `kubectl logs <nifi-pod> -c nifi | grep -i "python\|extension"` — look for a fresh startup line *after* your last change.
 4. **What relationships are auto-terminated?** Dump the live flow:
    ```bash
-   # `data/`, not `conf/`, on the CFM-operator pods - resolve it from nifi.properties (SKILL.md rule 1)
+   # `data/`, not `conf/`, on the CFM-operator pods - resolve it from nifi.properties (flow-api.md §0)
    kubectl exec <nifi-pod> -c nifi -- gunzip -c /opt/nifi/nifi-current/data/flow.json.gz \
      | jq '.rootGroup.processGroups[] | select(.name=="MyPG") | .processors[] | {name, autoTerminatedRelationships}'
    ```

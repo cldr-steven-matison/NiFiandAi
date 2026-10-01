@@ -2,6 +2,10 @@
 
 EFM (Edge Flow Manager) manages MiNiFi agents: it stores agent-class flows, deploys agent binaries, and pushes flow updates to agents over their heartbeat.
 
+## 0. C++ vs Java agent: who can answer an HTTP caller (skill rule 6)
+
+MiNiFi **C++** has no `HandleHttpRequest`/`HandleHttpResponse` pair. Its `ListenHTTP` is fire-and-forget: the caller gets an empty 200 ack, and the real reply must leave via Kafka keyed on a caller-supplied `request_id`. That limit is **C++-only**. The MiNiFi **Java** agent ships both processors and the `StandardHttpContextMap` controller service (verified in the agent NAR bundle, `1.23.04-b15` and `2.24.08.0-19`), and the early-ack flow `HandleHttpRequest` → `HandleHttpResponse(200)` → rest of flow returns a real 200 in ~84 ms while the FlowFile carries on downstream. EFM's Flow Designer exposes both with no side-loading. The cost: a Java agent runs ~500 MB RSS / ~500 MB installed against C++'s ~100 MB RSS / ~247 MB installed. Java and C++ agents run side by side under separate agent classes with no conflict.
+
 ## 1. Stage agent binaries into EFM
 
 EFM's `agent-deployer/binaries` directory layout is **strict**: its validator rejects hyphens in `osArch` and more than one archive per leaf directory. Layout for the common four:

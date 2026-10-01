@@ -2,6 +2,32 @@
 
 Covers the Kubernetes / operator-managed case; the same API calls work against a host-native NiFi once you have an auth handle and can reach `$NIFI/nifi-api`.
 
+## Deployment shapes
+
+| Shape | Where it lives | Auth | When |
+|---|---|---|---|
+| **Operator-managed on Kubernetes** | A `Nifi` CR → StatefulSet pod | Operator-issued mTLS user cert, *or* Single-User Auth via a k8s secret | In-cluster flows |
+| **Host-native NiFi** | A tarball install, `bin/nifi.sh start`, single-user auth | Single-user login | A single VM / public-facing host |
+| **MiNiFi C++/Java agent (EFM-deployed)** | Windows service, Linux `minifi.service`, or a K8s pod | Unauthenticated agent→EFM heartbeat by default (`autoConfigureSecurity=false`) | Edge / desktop flows driven from EFM |
+
+A full edge-to-core deployment is often all three at once: **EFM + MiNiFi agents on the edge + Kafka in the middle + NiFi doing the heavier lift.**
+
+## 0. Read the live flow before you touch it (skill rule 1)
+
+Dump the live flow and read what is actually there. Never edit blind from a remembered description of the flow.
+
+```bash
+# Ask the pod where its flow lives - do NOT hardcode the directory.
+NIFI_HOME=/opt/nifi/nifi-current
+FLOW=$(kubectl exec <nifi-pod> -n $NS -c nifi -- \
+         sed -n 's|^nifi\.flow\.configuration\.file=\./||p' $NIFI_HOME/conf/nifi.properties)
+kubectl exec <nifi-pod> -n $NS -c nifi -- gunzip -c "$NIFI_HOME/$FLOW" | jq '<selector>'
+```
+
+**The flow file is not always under `conf/`.** `nifi.flow.configuration.file` decides, and on the CFM-operator pods it is `./data/flow.json.gz`. A hardcoded `conf/` path fails with an empty result and a zero-byte dump, which reads like "the flow is empty" rather than "you looked in the wrong place". Pass `-c nifi` too: an operator-managed pod runs the NiFi container alongside several log sidecars, and without it `kubectl exec` can land in one that has no flow at all.
+
+**`flow.json` is truth for structure and state, not for whether a sensitive property is parameter-bound.** It stores the resolved value of a `#{param}` reference as `enc{...}`, the same form as an inline literal. Ask the parameter context's `referencingComponents` instead (§5, "Is this property actually parameter-bound?"). Reading `enc{}` as "the migration never happened" once cost a third of a session, a wrong claim that credentials had regressed, and a re-run of a migration that had held for weeks.
+
 ## 1. Get an auth handle
 
 **Preferred — operator mTLS user cert (no login, no token expiry).** If NiFi is managed by an operator that issues a user cert, pull it from the secret and use it as a client cert:
