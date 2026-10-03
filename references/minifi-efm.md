@@ -77,6 +77,8 @@ curl -L \
  http://<efm-host>:10090/efm/api/agent-deployer/script | bash -
 ```
 
+Running that returned command is the enrollment. It always contains the server-minted `agentIdentifier`. Call `generateCommand` once, then run the command it returned. Calling `generateCommand` again mints another identifier.
+
 > **Real-world failure mode:** consolidating two agent classes into one, a Java agent was re-enrolled with a **hand-built** deployer `curl` that **reused the retired agent's `agentIdentifier`**. The EFM C2 `UPDATE` pushing the flow to the re-enrolled agent failed twice (`state: FAILED`), and the Agents update-status column showed errors for the class. Fixed by re-enrolling via `generateCommand` with its server-generated identifier. The one place reusing an identifier is correct is restoring the **exact same** bare pod that was never de-registered (§11) — a *new* enrollment or a *class migration* is not that case; mint a fresh identifier.
 
 - **Windows:** run the *generated* command via `Invoke-WebRequest ... | Invoke-Expression` from PowerShell **as Administrator**. Do **not** run it from `C:\WINDOWS\system32` — the deployer installs to `$PWD` and system32 is a permission nightmare. `cd` to a clean dir first.
