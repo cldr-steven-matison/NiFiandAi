@@ -39,6 +39,7 @@ SINK_SPAN = 600               # a sink fed from more than 3 rows (600 px) away i
 MASTER_LABEL_MIN_PROCS = 6
 FAILURE_RELS = {"failure", "no retry", "unmatched", "nonzero status", "invalid", "timeout"}
 SINK_TYPES = ("LogAttribute", "LogMessage")
+CHAR_W, LINE_H = 7.5, 18      # a 14 px label: ~7.5 px a character, ~18 px a line
 
 
 # ── loading ──────────────────────────────────────────────────────────────────
@@ -209,6 +210,17 @@ def check_pg(pg, args):
         for b in boxes:
             if overlaps(lb, b) and not contains(lb, b):
                 say("FAIL", f"label {lb['name']!r} at ({lb['x']:.0f},{lb['y']:.0f}) partly covers {fmt(b)}")
+    # a label sized far past its text reads as an empty block; one wider than the flow overhangs it
+    if boxes:
+        flow_w = max(b["x"] + b["w"] for b in boxes) - min(b["x"] for b in boxes)
+        for lb in labels:
+            lines = sum(max(1, math.ceil(len(ln) * CHAR_W / max(lb["w"], 1))) for ln in lb.get("text", "").split("\n"))
+            if lb["h"] > 200 and lb["h"] > 2.5 * lines * LINE_H:
+                say("WARN", f"label {lb['name']!r} is {lb['w']:.0f}x{lb['h']:.0f} for ~{lines} lines of text: size it "
+                            f"to its text")
+            if lb["w"] > flow_w + 600:
+                say("WARN", f"label {lb['name']!r} is {lb['w']:.0f} wide over a {flow_w:.0f}-wide flow: keep it "
+                            f"inside the flow's extents")
     if len(procs) >= MASTER_LABEL_MIN_PROCS and boxes:
         top = min(b["y"] for b in boxes)
         if not any(lb["y"] + lb["h"] <= top + 1 for lb in labels):
@@ -228,12 +240,16 @@ def check_pg(pg, args):
                         f"line and raise NiFi's overlap warning: merge them into one connection carrying every "
                         f"relationship, or give all but one a bend")
 
-    # 4. direction inside a chain: processor/funnel -> processor/funnel never points up
+    # 4. direction inside a chain: processor/funnel -> processor/funnel never points up. A failure leg is not
+    # the chain: a shared sink or failure funnel sits beside the middle of the run it serves, so its lower
+    # sources reach up to it (as every shared sink on a hand-tuned canvas does)
     allowed = set(args.allow_upward or [])
     for c in conns:
         s, d = comps[c["src"]], comps[c["dst"]]
         if c["src"] == c["dst"] or c["bends"] or s["kind"] not in ("PROCESSOR", "FUNNEL") \
                 or d["kind"] not in ("PROCESSOR", "FUNNEL"):
+            continue
+        if d.get("type") in SINK_TYPES or (c["rels"] and all(r.lower() in FAILURE_RELS for r in c["rels"])):
             continue
         if d["y"] < s["y"] and f"{s['name']}->{d['name']}" not in allowed:
             say("FAIL", f"routes upward: {fmt(s)} -> {fmt(d)}  (move the destination down, or --allow-upward "
@@ -258,9 +274,12 @@ def check_pg(pg, args):
             say("WARN", f"sink {d['name']} is fed from {abs(dy - sy):.0f}px away ({s['name']}): give that stage its "
                         f"own sink on its row")
 
-    # 6. straight lines through a third box
+    # 6. straight lines through a third box; a self-loop with no bends draws as a stub on its own box
     for c in conns:
         if c["src"] == c["dst"]:
+            if not c["bends"]:
+                say("WARN", f"self-loop {comps[c['src']]['name']} [{','.join(c['rels'])}] has no bends and draws as a "
+                            f"stub: give it the loop bends on the box's open side")
             continue
         pts = path(c, comps)
         for b in boxes:

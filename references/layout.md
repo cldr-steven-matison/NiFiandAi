@@ -15,6 +15,8 @@ The rules below were known and still skipped: an injected reminder got read as b
 
 **No exemption for small adds.** A single diagnostic `LogAttribute` bolted on mid-debug still lands at the `position` you send. Run the pitch for it too.
 
+**Hand-tuned canvases are the reference.** When a human has re-laid a flow, diff it against its generated export, read what moved and why, and fold that back into these rules. Never "fix" their canvas to match the rules.
+
 **Honesty bar.** Good coordinates get a build close to hand-laid, not to finished. Say what the flow does, run the checker, and expect a human sliding pass. Never claim a build is visually done.
 
 ## The canvas NiFi actually draws
@@ -47,14 +49,23 @@ The UI snaps hand moves to an **8 px grid**. A hand-tuned flow reads 192/208/632
 - **Linear chain:** same x, `y += row`.
 - **Branch / fan-out:** the router stays on the spine. Its N targets share one row (`router.y + row`) at `x = ±pitch` (odd N keeps one on the spine). **Every same-row split gets the full pitch**, a bare OK/Error pair off any processor included.
 - **Join / merge:** the merge target goes back on the spine, one row below the lowest branch.
-- **Self-loop** (`Retry`, skill rule 7): stays in place, no new column. If the processor also continues (`InvokeHTTP` `Response` → next), it is a fan-out: the continuation stays on the spine, the error sink goes one branch pitch out on the **same row**.
+- **Self-loop** (`Retry`, skill rule 7): stays in place, no new column. Give it **two bends** just off the box, on the side away from the spine (`x + 352 + 60` or `x − 60`, at `y + 34` and `y + 94`). With no bends it draws as a stub on its own box, and nobody can see the loop is there. If the processor also continues (`InvokeHTTP` `Response` → next), it is a fan-out: the continuation stays on the spine, the error sink goes one branch pitch out on the **same row**.
 - **Pre-source timers** (`GenerateFlowFile`, roster fetch): negative y above the source, declared at build time.
 - **Parallel independent lanes (EFM):** each lane is its own horizontal row, source on the left; lanes ~200 apart, stages ~600 apart, the shared sink ~1000 past the last column.
-- **Ports:** next to what they connect, never laid out as a chain root of their own. An input port sits one row above the stage(s) it feeds, centred over them, or the nearest free slot on that row; a port that joins mid-flow (a reply coming back in) sits above that stage, not at the top of the canvas. A collecting output port sits below or beside its legs.
+- **Ports:** next to what they connect, never laid out as a chain root of their own. An input port sits about 100 px above the stage it feeds, centred on it (`x + 56`: a 240-wide port over a 352-wide box), or the nearest free slot on that row; a port that joins mid-flow (a reply coming back in) sits above that stage, not at the top of the canvas. An output port sits beside or just under the processor that feeds it, at that processor's row, never in a row of its own across the canvas. A router feeding several ports stacks them in a short column beside it, fed from one bus.
+
+### Long connections: lanes, not diagonals
+
+A connection that skips rows or crosses columns runs in a **lane**: right-angle bends down a free gap between columns (the 248 px beside a 352-wide box at the 600 pitch), then across into its target. A straight diagonal across the canvas cuts through every box in its way. Lane-routed canvases can show plenty of line-over-line crossings and still have no line through a box. The checker's "passes through" WARN is the one to drive to zero.
+
+- **A wide fan-out** (one router, many legs) goes down to a **bus row** below the router, across, and down into each leg head. Each leg's caption sits to the right of that drop, clear of the next leg's drop.
+- **Legs that rejoin** (several reads feeding one shared step) gather on one row just above that step, then go in.
+- **A skip within one column** (a `No Retry` that jumps the next processor) goes down the column's side, not through the box below.
+- **Responses that come back from far legs** join the responder from below, clear of what sits beside it.
 
 ### Direction and sprawl
 
-1. **Route down, never up.** Every processor/funnel → processor/funnel connection points down or level. If a destination "must" be above, move it. A deliberate loop back (pagination, a retry leg) is the exception: give it a bend, and pass `--allow-upward "Src->Dst"` to the checker so it is declared, not accidental.
+1. **Route down, never up.** Every processor/funnel → processor/funnel connection in the chain points down or level. If a destination "must" be above, move it. A deliberate loop back (pagination, a retry leg) is the exception: give it a bend, and pass `--allow-upward "Src->Dst"` to the checker so it is declared, not accidental. A **failure leg is not the chain**: a line into a shared sink or failure funnel may run up (below).
 2. **Add down, never up.** New processors extend a chain below the existing ones, never squeezed above.
 3. **New work goes right, clear of existing work.** Read the extents first (`max(position.x)`), leave at least one branch pitch of clear space, never interleave columns, never start at `(0,0)` because the call defaulted there.
 4. **Inserting into `A → B`:** give `C` a full row below `A` and push `B` and everything under it down one row. Never the midpoint. Keep rows aligned with parallel columns.
@@ -64,15 +75,17 @@ The UI snaps hand moves to an **8 px grid**. A hand-tuned flow reads 192/208/632
 
 `LogAttribute` gets overdone. Sinks are a **dev tool with a prod pass**, never one shared sink across the canvas.
 
-- **Dev build:** one log sink **per stage**, on its source's **row**, one branch pitch outboard (spine 0 → sink 600), on the **side its source sits**: a branch left of the spine gets its sink further left, never across the spine. A sink may serve a contiguous run of stages, never rows far apart (the checker warns past 600 px). A shared sink sits on the row of its **lowest** source, so every line into it runs down or level. Set it to log at warn with the payload, `success` auto-terminated. Every failure is visible next to where it happened.
+- **Dev build:** one log sink **per stage**, on its source's **row**, one branch pitch outboard (spine 0 → sink 600), on the **side its source sits**: a branch left of the spine gets its sink further left, never across the spine. A sink may serve a contiguous run of stages, never rows far apart (the checker warns past 600 px). A shared sink sits **beside the middle of the run it serves**, as hand-tuned canvases place them, so the lines into it are short both ways. Set it to log at warn with the payload, `success` auto-terminated. Every failure is visible next to where it happened.
+- **Split by side.** Early rejects (validation, filters) can take a sink on the left, processing failures one on the right, so neither side's wires cross the spine. A wide canvas with legs on both sides gets **one sink or failure funnel per side**, plus one for the spine's own chain if it has failures too. Never one sink the whole canvas wires across.
+- **A failure funnel** sits on a lane, in the 72 px gap between two rows, never beside a box on its row. Each source leaves sideways onto the lane, so no failure wire cuts through its own column. The funnels then meet at one error step beside the responder.
 - **Prod pass:** auto-terminate most of them. NiFi's bulletin, `nifi-app.log` and the DROP provenance event are the record. **Keep** the sinks that capture a key failure. **Route** a failure that someone must act on to a notification/email PG instead of a log. `check_layout.py --profile prod` lists the sinks to decide on.
 - **Never auto-terminate `Retry`** (rule 7). A failed leg that must still answer an HTTP client goes to a responder, not a sink.
 - A **test funnel** is for a debugging session only: one funnel, many connections in, removed after.
 
 ### Labels
 
-- **One master label at the top of every PG** (14 px), above every component. It summarises the whole flow: what triggers it, what it does stage by stage, what it emits, where it fails to. It is the first thing a reader sees on opening the PG.
-- **Section captions where they help** (12 px, ~560 × 60, about three lines). Put each one in the gap above the section's first processor (`y − 66` at row pitch 200).
+- **One master label at the top of every PG** (14 px), above every component. It summarises the whole flow: what triggers it, what it does stage by stage, what it emits, where it fails to. It is the first thing a reader sees on opening the PG. **Size it to its text** (about 7.5 px a character and 18 px a line at 14 px) and keep it inside the flow's width. A one-line title stretched across the canvas, or a block a third empty, reads as clutter.
+- **Section captions where they help** (12 px, ~560 × 60, about three lines). Put each one in the gap above the section's first processor (`y − 66` at row pitch 200). Under a fan-out, shift it right of the wire that drops into the leg. A caption the wires run through can't be read.
 - A label may sit behind a whole lane of components, but never **partly** over a box. No colours needed.
 
 ## The root canvas and other PG-level canvases

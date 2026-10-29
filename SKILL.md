@@ -32,8 +32,8 @@ A rebuild or redeploy of a service a live `InvokeHTTP` calls kills its in-flight
 |---|---|
 | `references/flow-api.md` | Deployment shapes; reading the live flow; REST auth; upload / download (keeping exports current); safe live edits; parameter-bound checks; script restore traps. |
 | `references/flow-registry.md` | Add/update a PG without the root flow; GitHub as registry; upsert (stop→drain→delete→reimport); Parameter Context pre-create; k8s Job; Vault / AWS secrets. |
-| `references/layout.md` | Pre-flight, NiFi box sizes, in-PG pitches and shapes, direction rules, dev/prod failure sinks, labels, root-canvas hub-and-spoke, NiFi's overlapping-connection warning, delegation. |
-| `scripts/check_layout.py` | The layout rules as a checker: overlaps, label-gap pitch, bend-less duplicate connections, upward routes, far-flung ports/groups, unlabelled PGs, `Retry` auto-terminated. Non-zero exit on FAIL. |
+| `references/layout.md` | Pre-flight, NiFi box sizes, in-PG pitches and shapes, lanes for long connections, direction rules, dev/prod failure sinks and per-side funnels, labels sized to their text, root-canvas hub-and-spoke, NiFi's overlapping-connection warning, delegation. |
+| `scripts/check_layout.py` | The layout rules as a checker: overlaps, label-gap pitch, bend-less duplicate connections, upward routes in the chain (a failure leg may rise to its sink), far-flung ports/groups, lines through boxes, bend-less self-loops, labels oversized for their text or wider than the flow, unlabelled PGs, `Retry` auto-terminated. Non-zero exit on FAIL. |
 | `references/patterns.md` | NiFi as an HTTP API (incl. an SQL-backed door as one database function), the MiNiFi fire-and-forget router, ingest→Kafka→transform→sink (RAG), the edge→host bridge. |
 | `references/custom-processors.md` | Custom Python/Java processors, the EL binding traps, rebuild→redeploy, bundle-only version switch. |
 | `references/minifi-efm.md` | C++ vs Java agents, staging binaries, EFM persistence, `generateCommand`, Windows + Python, the EFM Designer API, dark-agent recovery, manifest-cache and `SYNC RESOURCE` traps. |
